@@ -118,7 +118,9 @@ jobs:
   dependency-review:
     name: Dependency Review
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # dependency-review-action requires GitHub Advanced Security on private
+    # repos; skip there and rely on Dependabot alerts instead.
+    if: github.event_name == 'pull_request' && github.event.repository.private == false
     permissions:
       contents: read
     steps:
