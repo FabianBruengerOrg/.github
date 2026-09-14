@@ -1,0 +1,101 @@
+name: Rust Checks (reusable)
+
+# Shared build/lint/test checks for FabianBruengerOrg Rust/Leptos apps.
+# Called via `uses: FabianBruengerOrg/.github/.github/workflows/rust-checks.yml@main`
+#
+# Security-focused checks (cargo-audit, secret scanning, Semgrep, ...) live in
+# rust-security.yml and are intentionally not duplicated here.
+
+on:
+  workflow_call:
+    inputs:
+      clippy-features:
+        description: "Feature flags to run an extra `cargo clippy --features <this>` pass with (e.g. 'ssr'). Empty skips this pass."
+        type: string
+        default: "ssr"
+      run-plain-clippy:
+        description: "Also run `cargo clippy --all-targets -- -D warnings` with no extra features"
+        type: boolean
+        default: true
+      test-features:
+        description: "Feature flags for `cargo test --all-targets --features <this>` (empty runs with no extra features)"
+        type: string
+        default: "ssr"
+      run-hydrate-check:
+        description: "Run `cargo check --no-default-features --features hydrate --target wasm32-unknown-unknown`"
+        type: boolean
+        default: false
+      run-ssr-check:
+        description: "Run `cargo check --no-default-features --features ssr`"
+        type: boolean
+        default: false
+      pulumi-validate-paths:
+        description: "Space-separated Python file paths to validate with `python -m py_compile`"
+        type: string
+        default: ""
+      extra-apt-packages:
+        description: "Space-separated apt packages to install before building (e.g. system deps for native crates)"
+        type: string
+        default: ""
+      python-version:
+        description: "Python version for Pulumi program validation"
+        type: string
+        default: "3.11"
+
+jobs:
+  checks:
+    name: Rust Checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install extra apt packages
+        if: inputs.extra-apt-packages != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ${{ inputs.extra-apt-packages }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Validate Pulumi/Python program
+        if: inputs.pulumi-validate-paths != ''
+        run: python -m py_compile ${{ inputs.pulumi-validate-paths }}
+
+      - name: Rust format check
+        run: cargo fmt --check
+
+      - name: Rust clippy (with features)
+        if: inputs.clippy-features != ''
+        run: cargo clippy --all-targets --features ${{ inputs.clippy-features }} -- -D warnings
+
+      - name: Rust clippy (no extra features)
+        if: inputs.run-plain-clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Rust tests (with features)
+        if: inputs.test-features != ''
+        run: cargo test --all-targets --features ${{ inputs.test-features }}
+
+      - name: Rust tests (no extra features)
+        if: inputs.test-features == ''
+        run: cargo test --all-targets
+
+      - name: Rust SSR compile check
+        if: inputs.run-ssr-check
+        run: cargo check --no-default-features --features ssr
+
+      - name: Rust hydrate compile check
+        if: inputs.run-hydrate-check
+        run: cargo check --no-default-features --features hydrate --target wasm32-unknown-unknown

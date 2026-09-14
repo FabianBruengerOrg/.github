@@ -1,0 +1,107 @@
+name: Docker Build + Push (reusable)
+
+# Shared GHCR image build/push for FabianBruengerOrg apps.
+# Called via `uses: FabianBruengerOrg/.github/.github/workflows/docker-build-push.yml@main`
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: "JSON-encoded runner target, e.g. '\"ubuntu-latest\"' or '[\"self-hosted\",\"macOS\"]'"
+        type: string
+        default: '"ubuntu-latest"'
+      dockerfile:
+        description: "Path to the Dockerfile"
+        type: string
+        default: "docker/app/Dockerfile"
+      context:
+        description: "Docker build context"
+        type: string
+        default: "."
+      tags:
+        description: "Newline-separated list of image tags to build and push"
+        type: string
+        required: true
+      build-args:
+        description: "Newline-separated list of build args (KEY=value)"
+        type: string
+        default: ""
+      platforms:
+        description: "Target platform(s) for the image"
+        type: string
+        default: "linux/amd64"
+      cache-scope:
+        description: "GitHub Actions cache scope name"
+        type: string
+        required: true
+      setup-qemu:
+        description: "Install QEMU before building (needed for cross-arch emulation on self-hosted runners)"
+        type: boolean
+        default: false
+      macos-self-hosted-login:
+        description: >-
+          macOS `docker login` auto-selects credsStore=osxkeychain, which needs an
+          interactive keychain session a headless runner service doesn't have.
+          Enable this on self-hosted Mac runners to log in without touching the keychain.
+        type: boolean
+        default: false
+    secrets:
+      registry-username:
+        required: true
+      registry-password:
+        required: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    name: Build and Push Image
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    env:
+      DOCKER_CONFIG: ${{ github.workspace }}/.docker-ci
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Log in to GitHub Container Registry (macOS keychain-safe)
+        if: inputs.macos-self-hosted-login
+        env:
+          REGISTRY_USER: ${{ secrets.registry-username }}
+          REGISTRY_TOKEN: ${{ secrets.registry-password }}
+        run: |
+          mkdir -p "$DOCKER_CONFIG"
+          cp -a "$HOME/.docker/." "$DOCKER_CONFIG/" 2>/dev/null || true
+          [ -f "$DOCKER_CONFIG/config.json" ] || echo '{}' > "$DOCKER_CONFIG/config.json"
+          auth=$(printf '%s:%s' "$REGISTRY_USER" "$REGISTRY_TOKEN" | base64)
+          jq --arg registry "$REGISTRY" --arg auth "$auth" \
+            '.auths[$registry] = {auth: $auth} | del(.credsStore)' \
+            "$DOCKER_CONFIG/config.json" > "$DOCKER_CONFIG/config.json.tmp"
+          mv "$DOCKER_CONFIG/config.json.tmp" "$DOCKER_CONFIG/config.json"
+
+      - name: Log in to GitHub Container Registry
+        if: ${{ !inputs.macos-self-hosted-login }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.registry-username }}
+          password: ${{ secrets.registry-password }}
+
+      - name: Set up QEMU
+        if: inputs.setup-qemu
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: ${{ inputs.tags }}
+          build-args: ${{ inputs.build-args }}
+          cache-from: type=gha,scope=${{ inputs.cache-scope }}
+          cache-to: type=gha,scope=${{ inputs.cache-scope }},mode=max
+          platforms: ${{ inputs.platforms }}

@@ -1,0 +1,103 @@
+name: Pulumi Deploy (reusable)
+
+# Shared Pulumi/Kubernetes deployment for FabianBruengerOrg apps.
+# Called via `uses: FabianBruengerOrg/.github/.github/workflows/pulumi-deploy.yml@main`
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Path to the Pulumi program (relative to repo root)"
+        type: string
+        required: true
+      stack:
+        description: "Pulumi stack name (e.g. 'dev' or 'prod')"
+        type: string
+        required: true
+      environment-name:
+        description: "GitHub deployment environment name"
+        type: string
+        required: true
+      environment-url:
+        description: "GitHub deployment environment URL"
+        type: string
+        default: ""
+      helm-version:
+        description: "Helm chart version to set on the Pulumi stack config"
+        type: string
+        required: true
+      runs-on:
+        description: "JSON-encoded runner target, e.g. '\"ubuntu-latest\"' or '[\"self-hosted\",\"macOS\"]'"
+        type: string
+        default: '"ubuntu-latest"'
+      python-version:
+        description: "Python version for the Pulumi CLI/uv toolchain"
+        type: string
+        default: "3.11"
+      helm-cli-version:
+        description: "Helm CLI version to install (used for the GHCR OCI login)"
+        type: string
+        default: "v3.14.0"
+    secrets:
+      registry-username:
+        required: true
+      registry-password:
+        required: true
+      pulumi-access-token:
+        required: true
+      kubeconfig-content:
+        required: true
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.environment-name }}
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    environment:
+      name: ${{ inputs.environment-name }}
+      url: ${{ inputs.environment-url }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install Pulumi CLI
+        uses: pulumi/actions@v6
+
+      - name: Install Python dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: uv sync
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ inputs.helm-cli-version }}
+
+      - name: Log in to GHCR for Helm OCI
+        run: |
+          echo "${{ secrets.registry-password }}" | helm registry login ghcr.io \
+            --username ${{ secrets.registry-username }} \
+            --password-stdin
+
+      - name: Configure Pulumi stack
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.pulumi-access-token }}
+        run: |
+          uv run pulumi stack select ${{ inputs.stack }} --create
+          uv run pulumi config set --stack ${{ inputs.stack }} helm_version "${{ inputs.helm-version }}"
+
+      - name: Pulumi up
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.pulumi-access-token }}
+          KUBECONFIG_CONTENT: ${{ secrets.kubeconfig-content }}
+        run: |
+          uv run pulumi refresh --stack ${{ inputs.stack }} --yes --non-interactive
+          uv run pulumi up --stack ${{ inputs.stack }} --yes --non-interactive

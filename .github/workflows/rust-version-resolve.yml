@@ -1,0 +1,212 @@
+name: Resolve Version + Target (reusable)
+
+# Shared version/stack resolution for FabianBruengerOrg Rust/Leptos apps.
+# Called via `uses: FabianBruengerOrg/.github/.github/workflows/rust-version-resolve.yml@main`
+#
+# Convention: annotated tags on a release/* branch (vX.Y.Z) build "prod".
+# Everything else builds a preview image tagged off the latest lightweight
+# (or, on release/* branches, annotated) tag with a run-number suffix.
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: "Short app name, used to build the GHCR image name (<app-name>-app)"
+        type: string
+        required: true
+      production-url:
+        description: "Public URL of the production environment"
+        type: string
+        required: true
+      development-url:
+        description: "Public URL of the development environment (empty if this app has none)"
+        type: string
+        default: ""
+      preview-stack-name:
+        description: "Stack name used for non-tag builds (e.g. 'dev' or 'preview')"
+        type: string
+        default: "dev"
+      deploy-non-tag-builds:
+        description: "Whether non-tag (preview/dev) builds should be deployed at all"
+        type: boolean
+        default: true
+      include-short-sha:
+        description: "Append the short commit SHA to preview image/helm tags"
+        type: boolean
+        default: false
+      secondary-image-suffix:
+        description: "Optional suffix (e.g. '-db') for a second GHCR image name output"
+        type: string
+        default: ""
+    outputs:
+      image-name:
+        value: ${{ jobs.resolve-version.outputs.image-name }}
+      secondary-image-name:
+        value: ${{ jobs.resolve-version.outputs.secondary-image-name }}
+      image-tag:
+        value: ${{ jobs.resolve-version.outputs.image-tag }}
+      helm-version:
+        value: ${{ jobs.resolve-version.outputs.helm-version }}
+      stack:
+        value: ${{ jobs.resolve-version.outputs.stack }}
+      environment-name:
+        value: ${{ jobs.resolve-version.outputs.environment-name }}
+      environment-url:
+        value: ${{ jobs.resolve-version.outputs.environment-url }}
+      can-publish:
+        value: ${{ jobs.resolve-version.outputs.can-publish }}
+      deploy-enabled:
+        value: ${{ jobs.resolve-version.outputs.deploy-enabled }}
+      owner-lc:
+        value: ${{ jobs.resolve-version.outputs.owner-lc }}
+
+jobs:
+  resolve-version:
+    name: Resolve Version + Target
+    runs-on: ubuntu-latest
+    outputs:
+      image-name: ${{ steps.meta.outputs.image-name }}
+      secondary-image-name: ${{ steps.meta.outputs.secondary-image-name }}
+      image-tag: ${{ steps.meta.outputs.image-tag }}
+      helm-version: ${{ steps.meta.outputs.helm-version }}
+      stack: ${{ steps.meta.outputs.stack }}
+      environment-name: ${{ steps.meta.outputs.environment-name }}
+      environment-url: ${{ steps.meta.outputs.environment-url }}
+      can-publish: ${{ steps.meta.outputs.can-publish }}
+      deploy-enabled: ${{ steps.meta.outputs.deploy-enabled }}
+      owner-lc: ${{ steps.meta.outputs.owner-lc }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compute pipeline metadata
+        id: meta
+        env:
+          APP_NAME: ${{ inputs.app-name }}
+          REGISTRY: ghcr.io
+          PROD_URL: ${{ inputs.production-url }}
+          DEV_URL: ${{ inputs.development-url }}
+          PREVIEW_STACK: ${{ inputs.preview-stack-name }}
+          DEPLOY_NON_TAG: ${{ inputs.deploy-non-tag-builds }}
+          INCLUDE_SHORT_SHA: ${{ inputs.include-short-sha }}
+          SECONDARY_SUFFIX: ${{ inputs.secondary-image-suffix }}
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_NAME="${REGISTRY}/${OWNER_LC}/${APP_NAME}-app"
+          SECONDARY_IMAGE_NAME=""
+          if [ -n "$SECONDARY_SUFFIX" ]; then
+            SECONDARY_IMAGE_NAME="${REGISTRY}/${OWNER_LC}/${APP_NAME}${SECONDARY_SUFFIX}"
+          fi
+          CAN_PUBLISH="true"
+          DEPLOY_ENABLED="true"
+          RUN_SUFFIX=$(( ${{ github.run_number }} % 1000 ))
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+
+          git fetch --tags --force
+
+          latest_lightweight_tag() {
+            for tag in $(git tag -l --sort=-version:refname); do
+              if [ "$(git cat-file -t "$tag" 2>/dev/null)" = "commit" ]; then
+                echo "$tag"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          latest_annotated_tag() {
+            for tag in $(git tag -l --sort=-version:refname); do
+              if [ "$(git cat-file -t "$tag" 2>/dev/null)" = "tag" ]; then
+                echo "$tag"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          branch_for_versioning="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            branch_for_versioning="${{ github.base_ref }}"
+          fi
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            TAG_TYPE=$(git cat-file -t "refs/tags/${TAG_NAME}" 2>/dev/null)
+            if [ "$TAG_TYPE" != "tag" ]; then
+              echo "::error::Tag '${TAG_NAME}' is not annotated (detected type: ${TAG_TYPE:-missing})."
+              exit 1
+            fi
+
+            RELEASE_BRANCH=$(git branch -r --contains "${{ github.sha }}" | grep -E 'origin/release/' | head -1 | xargs)
+            if [ -z "$RELEASE_BRANCH" ]; then
+              echo "::error::Tag '${TAG_NAME}' is not on a release/* branch."
+              exit 1
+            fi
+
+            VERSION="${TAG_NAME#v}"
+            IMAGE_TAG="${VERSION}"
+            HELM_VERSION="${VERSION}"
+            STACK="prod"
+            ENVIRONMENT_NAME="production"
+            ENVIRONMENT_URL="${PROD_URL}"
+          else
+            if [[ "$branch_for_versioning" == release/* ]]; then
+              BASE_TAG=$(latest_annotated_tag)
+              if [ -z "$BASE_TAG" ]; then
+                echo "::error::No annotated tag found for release branch versioning."
+                exit 1
+              fi
+            else
+              BASE_TAG=$(latest_lightweight_tag)
+              if [ -z "$BASE_TAG" ]; then
+                echo "::error::No lightweight tag found for non-release branch versioning."
+                exit 1
+              fi
+            fi
+
+            BASE_VERSION="${BASE_TAG#v}"
+            if [[ "$BASE_VERSION" == *-* ]]; then
+              PREVIEW_BASE="$BASE_VERSION"
+            else
+              PREVIEW_BASE="${BASE_VERSION}-preview"
+            fi
+
+            if [ "$INCLUDE_SHORT_SHA" = "true" ]; then
+              IMAGE_TAG="${PREVIEW_BASE}.${RUN_SUFFIX}.sha-${SHORT_SHA}"
+              HELM_VERSION="${PREVIEW_BASE}.${RUN_SUFFIX}.sha-${SHORT_SHA}"
+            else
+              IMAGE_TAG="${PREVIEW_BASE}.${RUN_SUFFIX}"
+              HELM_VERSION="${PREVIEW_BASE}.${RUN_SUFFIX}"
+            fi
+            STACK="$PREVIEW_STACK"
+            ENVIRONMENT_NAME="development"
+            ENVIRONMENT_URL="${DEV_URL}"
+
+            if [ "$DEPLOY_NON_TAG" != "true" ]; then
+              DEPLOY_ENABLED="false"
+            fi
+
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              if [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+                CAN_PUBLISH="false"
+                DEPLOY_ENABLED="false"
+              fi
+
+              if [ "${{ github.event.pull_request.draft }}" = "true" ]; then
+                DEPLOY_ENABLED="false"
+              fi
+            fi
+          fi
+
+          echo "owner-lc=${OWNER_LC}" >> "$GITHUB_OUTPUT"
+          echo "image-name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "secondary-image-name=${SECONDARY_IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image-tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "helm-version=${HELM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "stack=${STACK}" >> "$GITHUB_OUTPUT"
+          echo "environment-name=${ENVIRONMENT_NAME}" >> "$GITHUB_OUTPUT"
+          echo "environment-url=${ENVIRONMENT_URL}" >> "$GITHUB_OUTPUT"
+          echo "can-publish=${CAN_PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "deploy-enabled=${DEPLOY_ENABLED}" >> "$GITHUB_OUTPUT"

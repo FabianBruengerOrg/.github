@@ -1,0 +1,99 @@
+name: Helm Build + Push (reusable)
+
+# Shared Helm chart packaging/publishing for FabianBruengerOrg apps.
+# Called via `uses: FabianBruengerOrg/.github/.github/workflows/helm-build-push.yml@main`
+#
+# App-specific chart mutations (bumping image tags in values.yaml, etc.) are
+# kept in each app's own repo as a small shell script referenced via
+# `prepare-script`, so this workflow stays generic.
+
+on:
+  workflow_call:
+    inputs:
+      chart-path:
+        description: "Path to the Helm chart directory"
+        type: string
+        required: true
+      artifact-name:
+        description: "Name for the uploaded chart artifact"
+        type: string
+        required: true
+      package-glob:
+        description: "Glob matching the packaged chart .tgz file(s)"
+        type: string
+        required: true
+      owner-lc:
+        description: "Lowercase GitHub owner/org, used for the OCI push target"
+        type: string
+        required: true
+      helm-version:
+        description: "Chart version to set (passed through to prepare-script as $VERSION)"
+        type: string
+        required: true
+      image-tag:
+        description: "App image tag to set (passed through to prepare-script as $IMAGE_TAG)"
+        type: string
+        required: true
+      prepare-script:
+        description: "Optional path (in the calling repo) to a script that mutates the chart before lint/package"
+        type: string
+        default: ""
+      lint-args:
+        description: "Extra arguments appended to `helm lint`"
+        type: string
+        default: ""
+      helm-cli-version:
+        description: "Helm CLI version to install"
+        type: string
+        default: "v3.14.0"
+    secrets:
+      registry-username:
+        required: true
+      registry-password:
+        required: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push-chart:
+    name: Build and Push Helm Chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ inputs.helm-cli-version }}
+
+      - name: Run chart prepare script
+        if: inputs.prepare-script != ''
+        env:
+          VERSION: ${{ inputs.helm-version }}
+          IMAGE_TAG: ${{ inputs.image-tag }}
+        run: bash "${{ inputs.prepare-script }}"
+
+      - name: Lint Helm chart
+        run: helm lint ${{ inputs.chart-path }} ${{ inputs.lint-args }}
+
+      - name: Package Helm chart
+        run: helm package ${{ inputs.chart-path }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.registry-username }}
+          password: ${{ secrets.registry-password }}
+
+      - name: Push Helm chart to OCI registry
+        run: helm push ${{ inputs.package-glob }} oci://ghcr.io/${{ inputs.owner-lc }}/charts
+
+      - name: Upload Helm chart artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.package-glob }}
+          retention-days: 30

@@ -1,0 +1,24 @@
+name: GitHub Release (reusable)
+
+# Shared "create a GitHub Release from the pushed tag" step.
+# Called via `uses: FabianBruengerOrg/.github/.github/workflows/github-release.yml@main`
+#
+# The caller must grant `permissions: contents: write` on the job that uses
+# this workflow.
+
+on:
+  workflow_call: {}
+
+jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release from tag
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
