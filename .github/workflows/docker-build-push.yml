@@ -45,6 +45,14 @@ on:
           Enable this on self-hosted Mac runners to log in without touching the keychain.
         type: boolean
         default: false
+      builder-name:
+        description: >-
+          Stable Buildx builder name to create-or-reuse instead of an ephemeral
+          one. Required on persistent self-hosted runners so `--mount=type=cache`
+          RUN steps (e.g. Cargo registry/target caches) survive between runs;
+          each ephemeral builder otherwise gets its own empty cache volume.
+        type: string
+        default: ""
     secrets:
       registry-username:
         required: true
@@ -92,7 +100,15 @@ jobs:
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
+        if: inputs.builder-name == ''
         uses: docker/setup-buildx-action@v3
+
+      - name: Set up persistent Docker Buildx builder
+        if: inputs.builder-name != ''
+        run: |
+          docker buildx inspect "${{ inputs.builder-name }}" >/dev/null 2>&1 || \
+            docker buildx create --name "${{ inputs.builder-name }}" --driver docker-container --bootstrap
+          docker buildx use "${{ inputs.builder-name }}"
 
       - name: Build and push image
         uses: docker/build-push-action@v7
