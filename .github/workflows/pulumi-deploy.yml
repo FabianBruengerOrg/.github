@@ -38,6 +38,14 @@ on:
         description: "Helm CLI version to install (used for the GHCR OCI login)"
         type: string
         default: "v3.14.0"
+      use-runner-python:
+        description: "Use preinstalled Python and uv on a self-hosted runner"
+        type: boolean
+        default: false
+      macos-keychain-safe-helm-login:
+        description: "Use an isolated Helm registry config instead of macOS Keychain"
+        type: boolean
+        default: false
     secrets:
       registry-username:
         required: true
@@ -60,11 +68,19 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Python
+        if: ${{ !inputs.use-runner-python }}
         uses: actions/setup-python@v7
         with:
           python-version: ${{ inputs.python-version }}
 
+      - name: Verify runner Python tooling
+        if: inputs.use-runner-python
+        run: |
+          python3 --version
+          uv --version
+
       - name: Install uv
+        if: ${{ !inputs.use-runner-python }}
         run: pip install uv
 
       - name: Install Pulumi CLI
@@ -79,7 +95,18 @@ jobs:
         with:
           version: ${{ inputs.helm-cli-version }}
 
+      - name: Log in to GHCR for Helm OCI (macOS keychain-safe)
+        if: inputs.macos-keychain-safe-helm-login
+        env:
+          HELM_REGISTRY_CONFIG: ${{ runner.temp }}/helm-registry-config.json
+        run: |
+          printf '%s' '${{ secrets.registry-password }}' | helm registry login ghcr.io \
+            --username '${{ secrets.registry-username }}' \
+            --password-stdin \
+            --registry-config "$HELM_REGISTRY_CONFIG"
+
       - name: Log in to GHCR for Helm OCI
+        if: ${{ !inputs.macos-keychain-safe-helm-login }}
         run: |
           echo "${{ secrets.registry-password }}" | helm registry login ghcr.io \
             --username ${{ secrets.registry-username }} \
